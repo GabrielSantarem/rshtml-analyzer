@@ -1,5 +1,6 @@
 pub mod signature;
 pub mod transpiler;
+pub mod ra_proxy;
 mod app_state;
 mod backend;
 mod consts;

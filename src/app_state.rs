@@ -6,6 +6,8 @@ use crate::app_state::highlight::Highlight;
 use crate::app_state::view::View;
 use crate::app_state::workspace::Workspace;
 use crate::backend::tree_extensions::TreeExtensions;
+use crate::ra_proxy::RustAnalyzerProcess;
+use crate::virtual_file::VirtualFileManager;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -21,6 +23,8 @@ pub struct AppState {
     pub views: Arc<RwLock<HashMap<String, View>>>,
     pub completion_items: Vec<CompletionItem>,
     pub language: Language,
+    pub ra_process: Arc<RwLock<Option<RustAnalyzerProcess>>>,
+    pub virtual_files: Arc<VirtualFileManager>,
 }
 
 impl AppState {
@@ -37,6 +41,8 @@ impl AppState {
             views: Arc::new(RwLock::new(HashMap::new())),
             completion_items,
             language,
+            ra_process: Arc::new(RwLock::new(None)),
+            virtual_files: Arc::new(VirtualFileManager::new()),
         }
     }
 

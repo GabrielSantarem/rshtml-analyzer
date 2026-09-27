@@ -1,9 +1,14 @@
-pub mod signature;
-pub mod transpiler;
-pub mod ra_proxy;
 mod app_state;
 mod backend;
 mod consts;
+pub mod logger;
+#[cfg(test)]
+pub mod pipeline_test;
+pub mod ra_proxy;
+pub mod signature;
+pub mod source_map;
+pub mod transpiler;
+pub mod virtual_file;
 
 use crate::app_state::AppState;
 use crate::backend::Backend;
@@ -69,13 +74,15 @@ async fn tcp_connection() {
         let (stream, client_addr) = listener.accept().await.unwrap();
         debug!("New client connected: {}", client_addr);
 
-        let (service, socket) = LspService::new(|client| Backend::new(client, AppState::setup()));
+        let (service, socket) = LspService::new(|client| {
+            crate::logger::set_lsp_client(client.clone());
+            Backend::new(client, AppState::setup())
+        });
 
         let (read, write) = tokio::io::split(stream);
 
         tokio::spawn(async move {
             Server::new(read, write, socket).serve(service).await;
-            debug!("Client session ended: {}", client_addr);
         });
     }
 }
@@ -84,6 +91,9 @@ async fn stdio_connection() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    let (service, socket) = LspService::new(|client| Backend::new(client, AppState::setup()));
+    let (service, socket) = LspService::new(|client| {
+        crate::logger::set_lsp_client(client.clone());
+        Backend::new(client, AppState::setup())
+    });
     Server::new(stdin, stdout, socket).serve(service).await;
 }

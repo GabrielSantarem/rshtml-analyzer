@@ -1,10 +1,11 @@
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{oneshot, Mutex};
 use serde_json::Value;
+use crate::{log_info, log_debug};
 
 /// Manages a background `rust-analyzer` downstream process
 /// and provides JSON-RPC communication via standard I/O pipes.
@@ -12,6 +13,7 @@ pub struct RustAnalyzerProcess {
     stdin: Arc<Mutex<ChildStdin>>,
     pending_requests: Arc<Mutex<std::collections::HashMap<i64, oneshot::Sender<Value>>>>,
     next_request_id: AtomicI64,
+    pub is_ready: Arc<AtomicBool>,
     _child: Arc<Mutex<Child>>,
 }
 
@@ -32,16 +34,19 @@ impl RustAnalyzerProcess {
 
         let pending_requests = Arc::new(Mutex::new(std::collections::HashMap::<i64, oneshot::Sender<Value>>::new()));
         let pending_clone = Arc::clone(&pending_requests);
+        let is_ready = Arc::new(AtomicBool::new(false));
+        let ready_clone = Arc::clone(&is_ready);
 
         // Spawn background task to read JSON-RPC responses from rust-analyzer stdout
         tokio::spawn(async move {
-            Self::stdout_reader_loop(stdout, pending_clone).await;
+            Self::stdout_reader_loop(stdout, pending_clone, ready_clone).await;
         });
 
         let process = Self {
             stdin: Arc::new(Mutex::new(stdin)),
             pending_requests,
             next_request_id: AtomicI64::new(1000),
+            is_ready,
             _child: Arc::new(Mutex::new(child)),
         };
 
@@ -71,6 +76,7 @@ impl RustAnalyzerProcess {
     async fn stdout_reader_loop(
         stdout: ChildStdout,
         pending: Arc<Mutex<std::collections::HashMap<i64, oneshot::Sender<Value>>>>,
+        is_ready: Arc<AtomicBool>,
     ) {
         let mut reader = BufReader::new(stdout);
         let mut header_line = String::new();
@@ -102,6 +108,48 @@ impl RustAnalyzerProcess {
                 let mut body_buf = vec![0u8; length];
                 if reader.read_exact(&mut body_buf).await.is_ok() {
                     if let Ok(msg) = serde_json::from_slice::<Value>(&body_buf) {
+                        // Monitor RA server status and progress
+                        if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
+                            let params = msg.get("params");
+                            if method == "experimental/serverStatus" {
+                                if let Some(quiescent) = params
+                                    .and_then(|p| p.get("quiescent"))
+                                    .and_then(|q| q.as_bool())
+                                {
+                                    is_ready.store(quiescent, Ordering::SeqCst);
+                                    let status_text = if quiescent {
+                                        "rust-analyzer is ready (workspace indexed)"
+                                    } else {
+                                        "rust-analyzer is loading workspace..."
+                                    };
+                                    log_info!("RA_STATUS", "{status_text}");
+                                }
+                            } else if method == "$/progress" {
+                                let val = params.and_then(|p| p.get("value"));
+                                let title = val
+                                    .and_then(|v| v.get("title"))
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("");
+                                let message = val
+                                    .and_then(|v| v.get("message"))
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("");
+                                let fraction = val
+                                    .and_then(|v| v.get("percentage"))
+                                    .and_then(|p| p.as_u64());
+
+                                let progress_str = match fraction {
+                                    Some(pct) => format!("[rust-analyzer] {} ({}%) {}", title, pct, message),
+                                    None => format!("[rust-analyzer] {} {}", title, message),
+                                };
+
+                                if !title.is_empty() || !message.is_empty() {
+                                    log_debug!("RA_PROGRESS", "{}", progress_str.trim());
+                                }
+                            }
+                        }
+
+                        // Dispatch response to awaiting oneshot channel
                         if let Some(id_val) = msg.get("id").and_then(|i| i.as_i64()) {
                             let mut map = pending.lock().await;
                             if let Some(sender) = map.remove(&id_val) {
@@ -169,6 +217,9 @@ impl RustAnalyzerProcess {
             "processId": std::process::id(),
             "rootUri": root_uri,
             "capabilities": {
+                "workspace": {
+                    "workspaceFolders": true
+                },
                 "textDocument": {
                     "completion": {
                         "completionItem": {
@@ -178,6 +229,9 @@ impl RustAnalyzerProcess {
                     "hover": {
                         "contentFormat": ["markdown", "plaintext"]
                     }
+                },
+                "window": {
+                    "workDoneProgress": true
                 }
             }
         });
@@ -193,6 +247,11 @@ impl RustAnalyzerProcess {
         let _ = self.send_notification("exit", serde_json::Value::Null).await;
         Ok(())
     }
+}
+
+/// Forwards legacy calls to structured log
+pub fn append_log(msg: &str) {
+    crate::logger::log(crate::logger::LogLevel::Info, "LEGACY", msg);
 }
 
 #[cfg(test)]

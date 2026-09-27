@@ -725,6 +725,7 @@ name = "rshtml-analyzer"
 version = "0.1.7"
 dependencies = [
  "clap",
+ "rshtml_core",
  "serde",
  "serde_json",
  "tokio",
@@ -737,6 +738,16 @@ dependencies = [
  "tree-sitter-html",
  "tree-sitter-rshtml",
  "tree-sitter-rust",
+]
+
+[[package]]
+name = "rshtml_core"
+version = "0.6.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+ "winnow",
 ]
 
 [[package]]
@@ -1431,9 +1442,12 @@ checksum = "271414315aff87387382ec3d271b52d7ae78726f5d44ac98b4f4030c91880486"
 
 [[package]]
 name = "winnow"
-version = "0.7.12"
+version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3edebf492c8125044983378ecb5766203ad3b4c2f7a922bd7dd207f6d443e95"
+checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "writeable"

@@ -1,4 +1,5 @@
 pub mod signature;
+pub mod transpiler;
 mod app_state;
 mod backend;
 mod consts;

@@ -1,18 +1,7 @@
-mod app_state;
-mod backend;
-mod consts;
-pub mod logger;
-#[cfg(test)]
-pub mod pipeline_test;
-pub mod ra_proxy;
-pub mod signature;
-pub mod source_map;
-pub mod transpiler;
-pub mod virtual_file;
-
-use crate::app_state::AppState;
-use crate::backend::Backend;
 use clap::Parser;
+use rshtml_analyzer::app_state::AppState;
+use rshtml_analyzer::backend::Backend;
+use rshtml_analyzer::consts;
 use tower_lsp::{LspService, Server};
 
 #[derive(Parser)]
@@ -75,7 +64,7 @@ async fn tcp_connection() {
         debug!("New client connected: {}", client_addr);
 
         let (service, socket) = LspService::new(|client| {
-            crate::logger::set_lsp_client(client.clone());
+            rshtml_analyzer::logger::set_lsp_client(client.clone());
             Backend::new(client, AppState::setup())
         });
 
@@ -92,7 +81,7 @@ async fn stdio_connection() {
     let stdout = tokio::io::stdout();
 
     let (service, socket) = LspService::new(|client| {
-        crate::logger::set_lsp_client(client.clone());
+        rshtml_analyzer::logger::set_lsp_client(client.clone());
         Backend::new(client, AppState::setup())
     });
     Server::new(stdin, stdout, socket).serve(service).await;

@@ -46,7 +46,7 @@ impl AppState {
         }
     }
 
-    pub(crate) fn setup() -> Self {
+    pub fn setup() -> Self {
         let mut parser = Parser::new();
 
         let lang = Language::new(tree_sitter_rshtml::LANGUAGE);

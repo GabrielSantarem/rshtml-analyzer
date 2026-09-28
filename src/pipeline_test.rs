@@ -25,7 +25,7 @@ async fn test_full_pipeline_with_real_workspace() {
         return;
     }
 
-        let test_template = rshtml_test_dir.join("views/__test_pipeline.rs.html");
+    let test_template = rshtml_test_dir.join("views/__test_pipeline.rs.html");
     let valid_template_content = r#"<div>
     @if self.footer {
         <p>@self.home_time.year()</p>
@@ -178,7 +178,10 @@ async fn test_full_pipeline_with_real_workspace() {
         .take(10)
         .collect();
     println!("Sample completion items: {:?}", labels);
-    println!("FIRST ITEM JSON: {}", serde_json::to_string_pretty(&items[0]).unwrap());
+    println!(
+        "FIRST ITEM JSON: {}",
+        serde_json::to_string_pretty(&items[0]).unwrap()
+    );
 
     assert!(
         items.len() >= 10,

@@ -14,6 +14,12 @@ pub enum SyntaxContext {
 }
 
 impl SyntaxContext {
+    /// Returns true if this syntactic context represents executable Rust code
+    /// that should be proxied to downstream rust-analyzer.
+    pub fn is_rust_code(&self) -> bool {
+        matches!(self, Self::RustCode)
+    }
+
     pub fn detect(tree: &Tree, source: &str, position: Position) -> Self {
         let byte_offset = Backend::position_to_byte_offset(source, position);
         let root = tree.root_node();
@@ -80,6 +86,38 @@ impl SyntaxContext {
                     }
 
                     if after_equals {
+                        // Check if the parameter value is a dynamic Rust block: `{ ... }`
+                        let trimmed_rest = if byte_offset < source.len() {
+                            &source[byte_offset..]
+                        } else {
+                            ""
+                        };
+
+                        // Inspect children of parameter to see if we are inside a brace block `{}`
+                        let mut cursor = n.walk();
+                        for child in n.children(&mut cursor) {
+                            let kind = child.kind();
+                            if (kind == "rust_block"
+                                || kind == "component_tag_parameter_value_block"
+                                || kind == "{"
+                                || kind == "}")
+                                || (child.start_byte() <= byte_offset
+                                    && byte_offset <= child.end_byte())
+                            {
+                                if let Ok(text) = child.utf8_text(source.as_bytes()) {
+                                    if text.starts_with('{') || kind.contains("rust") {
+                                        return Self::RustCode;
+                                    }
+                                }
+                            }
+                        }
+
+                        if trimmed_rest.trim_start().starts_with('{')
+                            || source[..byte_offset].trim_end().ends_with('{')
+                        {
+                            return Self::RustCode;
+                        }
+
                         return Self::ComponentParameterValue;
                     } else {
                         let mut component_name = String::new();
@@ -145,6 +183,7 @@ mod tests {
         // Position inside `Vec<String>` (line 2, col 18)
         let ctx = SyntaxContext::detect(&tree, source, Position::new(2, 18));
         assert_eq!(ctx, SyntaxContext::RustCode);
+        assert!(ctx.is_rust_code());
     }
 
     #[test]
@@ -155,6 +194,7 @@ mod tests {
         // Position inside `::<Vec<_>>` (line 1, col 28)
         let ctx = SyntaxContext::detect(&tree, source, Position::new(1, 28));
         assert_eq!(ctx, SyntaxContext::RustCode);
+        assert!(ctx.is_rust_code());
     }
 
     #[test]
@@ -165,6 +205,7 @@ mod tests {
         // Position inside html text (line 1, col 4)
         let ctx = SyntaxContext::detect(&tree, source, Position::new(1, 4));
         assert_eq!(ctx, SyntaxContext::Html);
+        assert!(!ctx.is_rust_code());
     }
 
     #[test]
@@ -175,5 +216,39 @@ mod tests {
         // Position inside the path string (col 10)
         let ctx = SyntaxContext::detect(&tree, source, Position::new(0, 10));
         assert_eq!(ctx, SyntaxContext::UseDirective);
+        assert!(!ctx.is_rust_code());
+    }
+
+    #[test]
+    fn test_context_in_component_tag_and_parameter() {
+        let source = "<Navbar title=\"Home\" />";
+        let tree = parse_rshtml(source);
+
+        // Position inside component name "Navbar" (col 3)
+        let tag_ctx = SyntaxContext::detect(&tree, source, Position::new(0, 3));
+        assert_eq!(tag_ctx, SyntaxContext::ComponentTag);
+
+        // Position inside parameter name "title" (col 9)
+        let param_ctx = SyntaxContext::detect(&tree, source, Position::new(0, 9));
+        assert_eq!(
+            param_ctx,
+            SyntaxContext::ComponentParameter("Navbar".to_string())
+        );
+
+        // Position inside static string value "Home" (col 16)
+        let val_ctx = SyntaxContext::detect(&tree, source, Position::new(0, 16));
+        assert_eq!(val_ctx, SyntaxContext::ComponentParameterValue);
+        assert!(!val_ctx.is_rust_code());
+    }
+
+    #[test]
+    fn test_context_in_component_dynamic_rust_parameter() {
+        let source = "<Layout footer={ @if self.footer { true } } />";
+        let tree = parse_rshtml(source);
+
+        // Position inside `{ @if self.footer ... }` (col 23: inside `self.footer`)
+        let ctx = SyntaxContext::detect(&tree, source, Position::new(0, 23));
+        assert_eq!(ctx, SyntaxContext::RustCode);
+        assert!(ctx.is_rust_code());
     }
 }

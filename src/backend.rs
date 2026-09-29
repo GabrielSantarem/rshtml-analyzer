@@ -8,7 +8,7 @@ pub mod tree_extensions;
 use crate::app_state::AppState;
 use std::path::PathBuf;
 use tower_lsp::Client;
-use tower_lsp::lsp_types::{Position, TextDocumentContentChangeEvent, Url};
+use tower_lsp::lsp_types::{Position, Range, TextDocumentContentChangeEvent, Url};
 use tree_sitter::{Point, Tree};
 
 pub struct Backend {
@@ -107,6 +107,32 @@ impl Backend {
                 break;
             }
         }
+    }
+
+    /// Calculates the range of the alphanumeric word prefix immediately preceding the cursor.
+    /// Used by autocomplete to supply exact  ranges,
+    /// preventing duplicated snippets (e.g.  or ).
+    pub fn find_word_prefix_range(source: &str, position: Position) -> Range {
+        let lines: Vec<&str> = source.lines().collect();
+        if (position.line as usize) >= lines.len() {
+            return Range::new(position, position);
+        }
+
+        let line = lines[position.line as usize];
+        let col = (position.character as usize).min(line.len());
+        let prefix = &line[..col];
+
+        // Walk backwards while character is alphanumeric or '_'
+        let mut start_col = col;
+        for ch in prefix.chars().rev() {
+            if ch.is_alphanumeric() || ch == '_' {
+                start_col -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        Range::new(Position::new(position.line, start_col as u32), position)
     }
 }
 
@@ -246,5 +272,24 @@ mod tests {
 
         backend.process_changes(vec![change], &mut source, &mut tree);
         assert_eq!(source, "<div>replacement</div>");
+    }
+    #[test]
+    fn test_find_word_prefix_range_basic() {
+        let text = "<div>@sel</div>
+<div>@mat</div>";
+        // Position at end of 'sel' (line 0, col 9)
+        let r_sel = Backend::find_word_prefix_range(text, Position::new(0, 9));
+        assert_eq!(r_sel.start, Position::new(0, 6)); // '@' is at 5, 's' is at 6
+        assert_eq!(r_sel.end, Position::new(0, 9));
+
+        // Position at end of 'mat' (line 1, col 9)
+        let r_mat = Backend::find_word_prefix_range(text, Position::new(1, 9));
+        assert_eq!(r_mat.start, Position::new(1, 6));
+        assert_eq!(r_mat.end, Position::new(1, 9));
+
+        // Position directly after '@' (no prefix yet)
+        let r_at = Backend::find_word_prefix_range(text, Position::new(0, 6));
+        assert_eq!(r_at.start, Position::new(0, 6));
+        assert_eq!(r_at.end, Position::new(0, 6));
     }
 }

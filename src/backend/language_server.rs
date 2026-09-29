@@ -1,25 +1,22 @@
 use crate::app_state::view::View;
 use crate::backend::Backend;
 use crate::backend::navigation_target::NavigationTarget;
-use crate::backend::server_capabilities::{semantic_tokens_capabilities, workspace_capabilities};
+use crate::backend::server_capabilities::build_server_capabilities;
 use crate::backend::syntax_context::SyntaxContext;
 use crate::backend::tree_extensions::TreeExtensions;
 use crate::consts;
 use crate::ra_proxy::RustAnalyzerProcess;
-use crate::signature::SignatureResolver;
 use crate::{log_debug, log_error, log_info};
 use tower_lsp::jsonrpc::Error;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionList, CompletionOptions, CompletionParams,
-    CompletionResponse, CompletionTextEdit, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    InsertTextFormat, Location, MarkupContent, MarkupKind, MessageType, OneOf, Range,
-    SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url,
+    CompletionItem, CompletionItemKind, CompletionList, CompletionParams, CompletionResponse,
+    CompletionTextEdit, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams, InitializeResult,
+    InitializedParams, InsertTextFormat, Location, LocationLink, MarkupContent, MarkupKind,
+    MessageType, Range, SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams,
+    SemanticTokensFullDeltaResult, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, ServerInfo, TextEdit, Url,
 };
 use tower_lsp::{LanguageServer, jsonrpc};
 use tracing::{debug, error};
@@ -44,6 +41,7 @@ impl LanguageServer for Backend {
                     .and_then(|uri| uri.to_file_path().ok())
             });
 
+        let mut downstream_caps = None;
         if let Some(path) = workspace_root_path {
             log_info!("WORKSPACE", "Workspace root path: {:?}", path);
             self.client
@@ -90,6 +88,7 @@ impl LanguageServer for Backend {
                             "[rshtml-analyzer] rust-analyzer connected downstream!".to_string(),
                         )
                         .await;
+                    downstream_caps = ra.server_capabilities().await;
                     let mut ra_lock = self.state.ra_process.write().await;
                     *ra_lock = Some(ra);
                 }
@@ -110,25 +109,7 @@ impl LanguageServer for Backend {
 
         debug!("Sending an initialize response.");
         Ok(InitializeResult {
-            capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::INCREMENTAL,
-                )),
-                semantic_tokens_provider: semantic_tokens_capabilities(),
-                completion_provider: Some(CompletionOptions {
-                    resolve_provider: Some(false),
-                    trigger_characters: Some(vec![
-                        "@".to_string(),
-                        "<".to_string(),
-                        ".".to_string(),
-                    ]),
-                    ..Default::default()
-                }),
-                definition_provider: Some(OneOf::Left(true)),
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                workspace: workspace_capabilities(),
-                ..Default::default()
-            },
+            capabilities: build_server_capabilities(downstream_caps),
             server_info: Some(ServerInfo {
                 name: "rshtml-analyzer".to_string(),
                 version: Some(format!(
@@ -242,12 +223,20 @@ impl LanguageServer for Backend {
             let workspace = self.state.workspace.read().await;
             if let Some(member) = workspace.get_member_by_view(&file_path) {
                 let ra_lock = self.state.ra_process.read().await;
+                let tree_ref = {
+                    let views = self.state.views.read().await;
+                    views
+                        .get(&params.text_document.uri.to_string())
+                        .map(|v| v.tree.clone())
+                };
+
                 if let Err(e) = self
                     .state
                     .virtual_files
                     .sync_template(
                         &params.text_document.uri,
                         &text,
+                        tree_ref.as_ref(),
                         &member.path,
                         ra_lock.as_ref(),
                     )
@@ -353,6 +342,11 @@ impl LanguageServer for Backend {
                 let updated_source = view.source.clone();
                 drop(views);
 
+                let tree_ref = {
+                    let views = self.state.views.read().await;
+                    views.get(&uri_str).map(|v| v.tree.clone())
+                };
+
                 let workspace = self.state.workspace.read().await;
                 if let Some(member) = workspace.get_member_by_view(&file_path) {
                     let ra_lock = self.state.ra_process.read().await;
@@ -362,6 +356,7 @@ impl LanguageServer for Backend {
                         .sync_template(
                             &params.text_document.uri,
                             &updated_source,
+                            tree_ref.as_ref(),
                             &member.path,
                             ra_lock.as_ref(),
                         )
@@ -521,30 +516,7 @@ impl LanguageServer for Backend {
                 || trigger_char == Some('.');
 
             if is_self_dot || syntax_context == SyntaxContext::RustCode {
-                // 1. Prioritize immediate struct fields
-                if let Ok(file_path) = uri.to_file_path() {
-                    let workspace = self.state.workspace.read().await;
-                    if let Some(member) = workspace.get_member_by_view(&file_path) {
-                        if let Ok(rel_path) = file_path.strip_prefix(&member.path) {
-                            if let Some(resolved) = SignatureResolver::resolve(
-                                &member.path,
-                                rel_path.to_str().unwrap_or_default(),
-                            ) {
-                                for field in resolved.fields {
-                                    completion_items.push(CompletionItem {
-                                        label: field.name.clone(),
-                                        kind: Some(CompletionItemKind::FIELD),
-                                        detail: Some(field.field_type),
-                                        sort_text: Some(format!("0_{}", field.name)),
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 2. Query downstream rust-analyzer on the virtual file with translated coordinates
+                // Query downstream rust-analyzer on the virtual file with translated coordinates
                 if let Some(vdoc) = self.state.virtual_files.get_by_template_uri(&uri).await {
                     let virt_pos = vdoc.source_map.template_to_virtual(position);
                     let ra_lock = self.state.ra_process.read().await;
@@ -581,9 +553,6 @@ impl LanguageServer for Backend {
                                         .retain(|item| !item.label.contains("__rshtml_virtual_"));
 
                                     for item in &mut ra_items {
-                                        if let Some(ref sort) = item.sort_text {
-                                            item.sort_text = Some(format!("1_{}", sort));
-                                        }
                                         // Translate textEdit range from virtual Rust back to template coordinates
                                         if let Some(ref mut edit) = item.text_edit {
                                             match edit {
@@ -644,12 +613,28 @@ impl LanguageServer for Backend {
                     }
 
                     if tc == '@' {
-                        completion_items.extend(self.state.completion_items.clone());
+                        let word_range = Backend::find_word_prefix_range(&view.source, position);
+                        let mut snippets = self.state.completion_items.clone();
+                        for s in &mut snippets {
+                            if s.text_edit.is_none() {
+                                let new_text = s.insert_text.clone().unwrap_or_else(|| s.label.clone());
+                                s.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+                                    range: word_range,
+                                    new_text,
+                                }));
+                            }
+                        }
+                        completion_items.extend(snippets);
+
                         completion_items.push(CompletionItem {
                             label: "self".to_string(),
                             kind: Some(CompletionItemKind::KEYWORD),
                             detail: Some("Template struct instance".to_string()),
                             sort_text: Some("0_self".to_string()),
+                            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                                range: word_range,
+                                new_text: "self".to_string(),
+                            })),
                             ..Default::default()
                         });
                     }
@@ -658,7 +643,18 @@ impl LanguageServer for Backend {
                         completion_items.push(item.clone());
                     }
 
-                    completion_items.extend(self.state.completion_items.clone());
+                    let word_range = Backend::find_word_prefix_range(&view.source, position);
+                    let mut snippets = self.state.completion_items.clone();
+                    for s in &mut snippets {
+                        if s.text_edit.is_none() {
+                            let new_text = s.insert_text.clone().unwrap_or_else(|| s.label.clone());
+                            s.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+                                range: word_range,
+                                new_text,
+                            }));
+                        }
+                    }
+                    completion_items.extend(snippets);
                 }
             } else {
                 match syntax_context {
@@ -713,31 +709,63 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
 
-        let views_path = match self.get_views_path_for_uri(uri).await {
-            Some(path) => path,
-            None => return Ok(None),
-        };
-
         let views = self.state.views.read().await;
-        if let Some(view) = views.get(&uri.to_string())
-            && let Some(target) = NavigationTarget::resolve_at(
-                &view.tree,
-                &view.source,
-                position,
-                &view.use_directives,
-                &views_path,
-            )
-        {
-            let path = match target {
-                NavigationTarget::Component { target_path, .. } => target_path,
-                NavigationTarget::UseDirective { target_path, .. } => target_path,
-            };
+        if let Some(view) = views.get(&uri.to_string()) {
+            let syntax_context = SyntaxContext::detect(&view.tree, &view.source, position);
 
-            if let Ok(uri) = Url::from_file_path(path) {
-                return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                    uri,
-                    range: Range::default(),
-                })));
+            // 1. If inside Rust code, proxy goto_definition to downstream rust-analyzer!
+            if syntax_context.is_rust_code() {
+                if let Some(vdoc) = self.state.virtual_files.get_by_template_uri(uri).await {
+                    let virt_pos = vdoc.source_map.template_to_virtual(position);
+                    let ra_lock = self.state.ra_process.read().await;
+                    if let Some(ra) = ra_lock.as_ref() {
+                        let ra_req = serde_json::json!({
+                            "textDocument": { "uri": vdoc.virtual_uri.to_string() },
+                            "position": { "line": virt_pos.line, "character": virt_pos.character },
+                        });
+
+                        log_debug!(
+                            "RA_DEFINITION",
+                            "Querying downstream RA definition at virtual line {} col {}",
+                            virt_pos.line,
+                            virt_pos.character
+                        );
+
+                        if let Ok(ra_res) = ra.send_request("textDocument/definition", ra_req).await {
+                            if let Some(result_val) = ra_res.get("result").filter(|v| !v.is_null()) {
+                                if let Ok(mut def_response) =
+                                    serde_json::from_value::<GotoDefinitionResponse>(result_val.clone())
+                                {
+                                    self.translate_definition_response(&mut def_response, &vdoc).await;
+                                    return Ok(Some(def_response));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Otherwise resolve Component or UseDirective navigation target
+            if let Some(views_path) = self.get_views_path_for_uri(uri).await {
+                if let Some(target) = NavigationTarget::resolve_at(
+                    &view.tree,
+                    &view.source,
+                    position,
+                    &view.use_directives,
+                    &views_path,
+                ) {
+                    let path = match target {
+                        NavigationTarget::Component { target_path, .. } => target_path,
+                        NavigationTarget::UseDirective { target_path, .. } => target_path,
+                    };
+
+                    if let Ok(target_uri) = Url::from_file_path(path) {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: target_uri,
+                            range: Range::default(),
+                        })));
+                    }
+                }
             }
         }
 
@@ -865,5 +893,62 @@ impl LanguageServer for Backend {
         });
 
         debug!("Workspace re-analysis complete.");
+    }
+}
+
+impl Backend {
+    async fn translate_definition_response(
+        &self,
+        resp: &mut GotoDefinitionResponse,
+        origin_vdoc: &crate::virtual_file::VirtualDocument,
+    ) {
+        match resp {
+            GotoDefinitionResponse::Scalar(loc) => {
+                self.translate_location(loc).await;
+            }
+            GotoDefinitionResponse::Array(locs) => {
+                for loc in locs {
+                    self.translate_location(loc).await;
+                }
+            }
+            GotoDefinitionResponse::Link(links) => {
+                for link in links {
+                    self.translate_location_link(link, origin_vdoc).await;
+                }
+            }
+        }
+    }
+
+    async fn translate_location(&self, loc: &mut Location) {
+        if let Some(target_vdoc) = self.state.virtual_files.get_by_virtual_uri(&loc.uri).await {
+            loc.uri = target_vdoc.template_uri.clone();
+            if let Some(mapped) = target_vdoc.source_map.virtual_to_template_range(loc.range) {
+                loc.range = mapped;
+            }
+        }
+    }
+
+    async fn translate_location_link(
+        &self,
+        link: &mut LocationLink,
+        origin_vdoc: &crate::virtual_file::VirtualDocument,
+    ) {
+        if let Some(target_vdoc) = self.state.virtual_files.get_by_virtual_uri(&link.target_uri).await {
+            link.target_uri = target_vdoc.template_uri.clone();
+            if let Some(mapped) = target_vdoc.source_map.virtual_to_template_range(link.target_range) {
+                link.target_range = mapped;
+            }
+            if let Some(mapped) =
+                target_vdoc.source_map.virtual_to_template_range(link.target_selection_range)
+            {
+                link.target_selection_range = mapped;
+            }
+        }
+
+        if let Some(origin) = link.origin_selection_range {
+            if let Some(mapped_origin) = origin_vdoc.source_map.virtual_to_template_range(origin) {
+                link.origin_selection_range = Some(mapped_origin);
+            }
+        }
     }
 }

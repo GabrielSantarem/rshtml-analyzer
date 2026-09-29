@@ -38,6 +38,11 @@ impl TemplateTranspiler {
         Ok(output)
     }
 
+    /// Wraps the template context with an empty body (testing if rust-analyzer keeps struct context)
+    pub fn wrap_empty_context(context: &ResolvedViewContext) -> TranspiledOutput {
+        Self::wrap_with_context("", context)
+    }
+
     /// Wraps the extracted template Rust body in a complete virtual file context.
     pub fn wrap_with_context(
         template_body: &str,
@@ -113,7 +118,9 @@ impl TemplateTranspiler {
         let header_lines_count = virtual_code.lines().count();
 
         // 5. Injected template body (preserves exact line spacing from rshtml_core!)
-        writeln!(virtual_code, "{}", template_body).unwrap();
+        if !template_body.is_empty() {
+            writeln!(virtual_code, "{}", template_body).unwrap();
+        }
 
         // 6. Close function and impl
         writeln!(virtual_code, "    }}").unwrap();
@@ -133,6 +140,28 @@ mod tests {
     use crate::signature::StructFieldInfo;
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_wrap_empty_context() {
+        let context = ResolvedViewContext {
+            struct_name: "IndexPage".to_string(),
+            impl_generics: None,
+            ty_generics: None,
+            where_clause: None,
+            rust_file_path: PathBuf::from("src/main.rs"),
+            use_statements: vec![],
+            fields: vec![],
+        };
+
+        let output = TemplateTranspiler::wrap_empty_context(&context);
+        assert!(output.virtual_code.contains("impl IndexPage {"));
+        assert!(
+            output
+                .virtual_code
+                .contains("pub fn __rshtml_virtual_context(&self) {")
+        );
+        assert_eq!(output.template_body, "");
+    }
 
     #[test]
     fn test_formatting_independence() {

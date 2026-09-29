@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_lsp::lsp_types::Url;
+use tree_sitter::Tree;
 
 /// Represents an active virtual file synchronized with downstream `rust-analyzer`.
 #[derive(Debug, Clone)]
@@ -48,7 +49,8 @@ impl VirtualFileManager {
     pub async fn sync_template(
         &self,
         template_uri: &Url,
-        _template_text: &str,
+        template_text: &str,
+        tree_opt: Option<&Tree>,
         crate_root: &Path,
         ra_process: Option<&RustAnalyzerProcess>,
     ) -> Result<VirtualDocument, String> {
@@ -73,7 +75,25 @@ impl VirtualFileManager {
         let transpile_res = TemplateTranspiler::transpile_file(&file_path, &views_dir, &resolved)
             .map_err(|e| format!("Transpilation error: {e}"))?;
 
-        let source_map = SourceMap::new(transpile_res.header_lines_count, 0);
+        // Build source map with high-precision spans from tree-sitter AST
+        let source_map = if let Some(tree) = tree_opt {
+            SourceMap::build_from_tree(tree, template_text, transpile_res.header_lines_count, 0)
+        } else {
+            let mut parser = tree_sitter::Parser::new();
+            let lang: tree_sitter::Language = tree_sitter_rshtml::LANGUAGE.into();
+            if parser.set_language(&lang).is_ok()
+                && let Some(parsed) = parser.parse(template_text, None)
+            {
+                SourceMap::build_from_tree(
+                    &parsed,
+                    template_text,
+                    transpile_res.header_lines_count,
+                    0,
+                )
+            } else {
+                SourceMap::new(transpile_res.header_lines_count, 0)
+            }
+        };
 
         // 3. Determine virtual file path and URI inside the parent's directory
         let clean_stem = file_path
@@ -132,9 +152,7 @@ impl VirtualFileManager {
                 let _ = tokio::fs::create_dir_all(parent).await;
                 let gitignore = parent.join(".gitignore");
                 if !gitignore.exists() {
-                    let _ = tokio::fs::write(&gitignore, "*
-!.gitignore
-").await;
+                    let _ = tokio::fs::write(&gitignore, "*\n!.gitignore\n").await;
                 }
             }
             // Write the virtual file to disk so rust-analyzer's module tree and Cargo graph find it
@@ -255,6 +273,27 @@ impl VirtualFileManager {
         let docs = self.documents.read().await;
         docs.get(&template_uri.to_string()).cloned()
     }
+
+    /// Retrieves an active virtual document by its virtual URI or virtual file path.
+    pub async fn get_by_virtual_uri(&self, virtual_uri: &Url) -> Option<VirtualDocument> {
+        let docs = self.documents.read().await;
+        if let Some(doc) = docs.values().find(|doc| &doc.virtual_uri == virtual_uri) {
+            return Some(doc.clone());
+        }
+        if let Ok(target_path) = virtual_uri.to_file_path() {
+            if let Some(doc) = docs.values().find(|doc| {
+                doc.virtual_file_path == target_path
+                    || (doc.virtual_file_path.file_name().is_some()
+                        && doc.virtual_file_path.file_name() == target_path.file_name())
+                    || (std::fs::canonicalize(&doc.virtual_file_path).is_ok()
+                        && std::fs::canonicalize(&doc.virtual_file_path).ok()
+                            == std::fs::canonicalize(&target_path).ok())
+            }) {
+                return Some(doc.clone());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
@@ -277,11 +316,16 @@ mod tests {
 
         let vfm = VirtualFileManager::new();
         let doc = vfm
-            .sync_template(&template_uri, &content, &rshtml_test_dir, None)
+            .sync_template(&template_uri, &content, None, &rshtml_test_dir, None)
             .await
             .expect("Virtual file synchronization must succeed");
 
         assert_eq!(doc.resolved_context.struct_name, "IndexPage");
         assert!(doc.virtual_code.contains("impl IndexPage"));
+        assert!(!doc.source_map.spans.is_empty(), "Spans must be extracted");
+
+        let found_by_virt = vfm.get_by_virtual_uri(&doc.virtual_uri).await;
+        assert!(found_by_virt.is_some(), "Must find virtual doc by virtual URI");
+        assert_eq!(found_by_virt.unwrap().template_uri, template_uri);
     }
 }

@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use serde_json::Value;
-use crate::{log_info, log_debug};
+use tower_lsp::lsp_types::ServerCapabilities;
+use crate::{log_info, log_debug, log_error};
 
 /// Manages a background `rust-analyzer` downstream process
 /// and provides JSON-RPC communication via standard I/O pipes.
@@ -14,6 +15,7 @@ pub struct RustAnalyzerProcess {
     pending_requests: Arc<Mutex<std::collections::HashMap<i64, oneshot::Sender<Value>>>>,
     next_request_id: AtomicI64,
     pub is_ready: Arc<AtomicBool>,
+    pub server_capabilities: Arc<RwLock<Option<ServerCapabilities>>>,
     _child: Arc<Mutex<Child>>,
 }
 
@@ -47,6 +49,7 @@ impl RustAnalyzerProcess {
             pending_requests,
             next_request_id: AtomicI64::new(1000),
             is_ready,
+            server_capabilities: Arc::new(RwLock::new(None)),
             _child: Arc::new(Mutex::new(child)),
         };
 
@@ -228,6 +231,9 @@ impl RustAnalyzerProcess {
                     },
                     "hover": {
                         "contentFormat": ["markdown", "plaintext"]
+                    },
+                    "definition": {
+                        "linkSupport": true
                     }
                 },
                 "window": {
@@ -238,7 +244,27 @@ impl RustAnalyzerProcess {
 
         let init_res = self.send_request("initialize", init_params).await?;
         self.send_notification("initialized", serde_json::json!({})).await?;
+
+        if let Some(caps_val) = init_res.pointer("/result/capabilities") {
+            match serde_json::from_value::<ServerCapabilities>(caps_val.clone()) {
+                Ok(caps) => {
+                    log_info!("RA_INIT", "Parsed downstream rust-analyzer server capabilities successfully");
+                    let mut lock = self.server_capabilities.write().await;
+                    *lock = Some(caps);
+                }
+                Err(e) => {
+                    log_error!("RA_INIT", "Failed to deserialize RA server capabilities: {}", e);
+                }
+            }
+        }
+
         Ok(init_res)
+    }
+
+    /// Returns the cached ServerCapabilities from downstream rust-analyzer, if available.
+    pub async fn server_capabilities(&self) -> Option<ServerCapabilities> {
+        let lock = self.server_capabilities.read().await;
+        lock.clone()
     }
 
     /// Gracefully shuts down the downstream process.
@@ -270,6 +296,9 @@ mod tests {
         let val = res.unwrap();
         let server_name = val.pointer("/result/serverInfo/name").and_then(|v| v.as_str());
         assert_eq!(server_name, Some("rust-analyzer"));
+
+        let caps = ra.server_capabilities().await;
+        assert!(caps.is_some(), "Downstream RA server capabilities should be parsed");
 
         let _ = ra.shutdown().await;
     }

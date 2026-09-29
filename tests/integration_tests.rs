@@ -188,6 +188,42 @@ async fn test_full_pipeline_with_real_workspace() {
         "Expected methods on DateTime<Utc> like year(), timestamp(), etc."
     );
 
+    // 8. Test goto_definition for self.home_time
+    let (def_line, def_col) = transpile_res
+        .virtual_code
+        .lines()
+        .enumerate()
+        .find_map(|(line_idx, line)| {
+            if let Some(col_idx) = line.find("home_time") {
+                Some((line_idx as u32, (col_idx + 2) as u32))
+            } else {
+                None
+            }
+        })
+        .expect("Should find home_time in virtual code");
+
+    let def_res = ra
+        .send_request(
+            "textDocument/definition",
+            serde_json::json!({
+                "textDocument": { "uri": virtual_uri },
+                "position": { "line": def_line, "character": def_col }
+            }),
+        )
+        .await;
+
+    assert!(def_res.is_ok(), "RA should respond to definition request");
+    let def_val = def_res.unwrap();
+    let def_result = def_val.get("result").filter(|v| !v.is_null());
+    assert!(
+        def_result.is_some(),
+        "Definition must resolve to backing struct field"
+    );
+
+    // 9. Verify server capabilities were retrieved
+    let caps = ra.server_capabilities().await;
+    assert!(caps.is_some(), "RA server capabilities must be populated");
+
     let _ = ra.shutdown().await;
     let _ = fs::remove_file(virtual_file_path);
     let _ = fs::remove_file(test_template);
@@ -374,6 +410,144 @@ impl IndexPage {
         items.len() >= 10,
         "Expected methods on DateTime<Utc> from in-memory didChange update"
     );
+
+    let _ = ra.shutdown().await;
+    let _ = fs::remove_file(virtual_file_path);
+}
+
+/// Tests that rust-analyzer keeps the struct context even when the function body is completely empty!
+#[tokio::test]
+async fn test_empty_function_body_keeps_context() {
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
+    let candidate = manifest_dir.join("../rshtml");
+    let workspace_path = if candidate.join("rshtml_test").exists() {
+        candidate
+    } else {
+        manifest_dir.clone()
+    };
+
+    let rshtml_test_dir = workspace_path.join("rshtml_test");
+    if !rshtml_test_dir.exists() {
+        return;
+    }
+
+    let views_dir = rshtml_test_dir.join("views");
+    let resolved_ctx = SignatureResolver::resolve(&rshtml_test_dir, "views/index.rs.html")
+        .expect("Signature resolution for index.rs.html must succeed");
+
+    // 1. Generate virtual code with EMPTY function body
+    let empty_output = TemplateTranspiler::wrap_empty_context(&resolved_ctx);
+    assert!(empty_output.virtual_code.contains("impl IndexPage {"));
+    assert!(
+        empty_output
+            .virtual_code
+            .contains("pub fn __rshtml_virtual_context(&self) {")
+    );
+
+    // 2. Start RA on workspace
+    let ra = RustAnalyzerProcess::spawn(None)
+        .await
+        .expect("RA must spawn");
+    let init_res = ra.initialize(workspace_path.to_str().unwrap()).await;
+    assert!(init_res.is_ok(), "RA must initialize on workspace");
+
+    // 3. Link parent module in-memory via didOpen
+    let parent_file = &resolved_ctx.rust_file_path;
+    let parent_uri = format!("file://{}", parent_file.to_str().unwrap());
+    let parent_content = fs::read_to_string(parent_file).unwrap();
+
+    let build_dir = views_dir.join(".build");
+    fs::create_dir_all(&build_dir).unwrap();
+    let virtual_file_path = build_dir.join("__rshtml_virtual_empty_test.rs");
+    let virtual_uri = format!("file://{}", virtual_file_path.to_str().unwrap());
+
+    let linkage_decl = format!(
+        "
+#[path = {:?}]
+#[allow(dead_code, unused_imports)]
+pub mod __rshtml_virtual_empty_test;
+",
+        virtual_file_path.to_string_lossy()
+    );
+    let augmented_parent = format!("{}{}", parent_content, linkage_decl);
+
+    ra.send_notification(
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": parent_uri,
+                "languageId": "rust",
+                "version": 1,
+                "text": augmented_parent
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    // 4. Write empty body code to disk & didOpen
+    fs::write(&virtual_file_path, &empty_output.virtual_code).unwrap();
+    ra.send_notification(
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": virtual_uri,
+                "languageId": "rust",
+                "version": 1,
+                "text": empty_output.virtual_code
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    // 5. Query RA for hover/symbols on self
+    let (target_line, target_col) = empty_output
+        .virtual_code
+        .lines()
+        .enumerate()
+        .find_map(|(line_idx, line)| {
+            if let Some(col_idx) = line.find("&self") {
+                Some((line_idx as u32, (col_idx + 1) as u32))
+            } else {
+                None
+            }
+        })
+        .expect("Should find &self in virtual code");
+
+    let _ = ra
+        .send_request(
+            "textDocument/hover",
+            serde_json::json!({
+                "textDocument": { "uri": virtual_uri },
+                "position": { "line": target_line, "character": target_col }
+            }),
+        )
+        .await;
+
+    let start = std::time::Instant::now();
+    let mut resolved_self = false;
+    while start.elapsed() < std::time::Duration::from_secs(15) {
+        let hover_res = ra
+            .send_request(
+                "textDocument/hover",
+                serde_json::json!({
+                    "textDocument": { "uri": virtual_uri },
+                    "position": { "line": target_line, "character": target_col }
+                }),
+            )
+            .await;
+        if let Ok(val) = hover_res {
+            if let Some(res) = val.get("result").filter(|v| !v.is_null()) {
+                println!("SUCCESS: RA returned hover for &self in empty body: {:?}", res);
+                resolved_self = true;
+                break;
+            }
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+    assert!(resolved_self, "RA must resolve &self in empty body after indexing");
 
     let _ = ra.shutdown().await;
     let _ = fs::remove_file(virtual_file_path);

@@ -1,0 +1,13 @@
+[package]
+name = "rshtml-sourcemap"
+version = "0.1.0"
+edition = "2024"
+description = "High-precision bi-directional source mapping between .rs.html templates and virtual Rust files"
+
+[dependencies]
+tower-lsp = "0.20.0"
+tree-sitter = "0.25.6"
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+tree-sitter-rshtml = { git = "https://github.com/rshtml/tree-sitter-rshtml.git", tag = "v0.1.6" }

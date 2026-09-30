@@ -1,0 +1,16 @@
+[package]
+name = "rshtml-vfs"
+version = "0.1.0"
+edition = "2024"
+description = "In-memory Virtual File System coordinator and LSP document synchronizer"
+
+[dependencies]
+rshtml-sourcemap = { path = "../rshtml-sourcemap" }
+rshtml-ra-proxy = { path = "../rshtml-ra-proxy" }
+rshtml-signature = { path = "../rshtml-signature" }
+rshtml-transpiler = { path = "../rshtml-transpiler" }
+tower-lsp = "0.20.0"
+tokio = { version = "1.45.1", features = ["full"] }
+tree-sitter = "0.25.6"
+tree-sitter-rshtml = { git = "https://github.com/rshtml/tree-sitter-rshtml.git", tag = "v0.1.6" }
+serde_json = "1.0.151"

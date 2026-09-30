@@ -1,3 +1,13 @@
+[workspace]
+members = [
+    ".",
+    "crates/rshtml-sourcemap",
+    "crates/rshtml-ra-proxy",
+    "crates/rshtml-signature",
+    "crates/rshtml-transpiler",
+    "crates/rshtml-vfs",
+]
+
 [package]
 name = "rshtml-analyzer"
 version = "0.1.7"
@@ -21,3 +31,10 @@ serde_json = "1.0.151"
 syn = { version = "2.0.111", features = ["full"] }
 quote = "1.0.40"
 rshtml_core = { version = "0.6.1", path = "../rshtml/rshtml_core" }
+
+
+rshtml-sourcemap = { path = "crates/rshtml-sourcemap" }
+rshtml-ra-proxy = { path = "crates/rshtml-ra-proxy" }
+rshtml-signature = { path = "crates/rshtml-signature" }
+rshtml-transpiler = { path = "crates/rshtml-transpiler" }
+rshtml-vfs = { path = "crates/rshtml-vfs" }

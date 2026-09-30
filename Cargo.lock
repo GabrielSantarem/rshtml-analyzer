@@ -726,6 +726,11 @@ version = "0.1.7"
 dependencies = [
  "clap",
  "quote",
+ "rshtml-ra-proxy",
+ "rshtml-signature",
+ "rshtml-sourcemap",
+ "rshtml-transpiler",
+ "rshtml-vfs",
  "rshtml_core",
  "serde",
  "serde_json",
@@ -740,6 +745,61 @@ dependencies = [
  "tree-sitter-html",
  "tree-sitter-rshtml",
  "tree-sitter-rust",
+]
+
+[[package]]
+name = "rshtml-ra-proxy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-lsp",
+]
+
+[[package]]
+name = "rshtml-signature"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "rshtml-sourcemap"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tower-lsp",
+ "tree-sitter",
+ "tree-sitter-rshtml",
+]
+
+[[package]]
+name = "rshtml-transpiler"
+version = "0.1.0"
+dependencies = [
+ "rshtml-signature",
+ "rshtml_core",
+ "tree-sitter",
+ "tree-sitter-rshtml",
+]
+
+[[package]]
+name = "rshtml-vfs"
+version = "0.1.0"
+dependencies = [
+ "rshtml-ra-proxy",
+ "rshtml-signature",
+ "rshtml-sourcemap",
+ "rshtml-transpiler",
+ "serde_json",
+ "tokio",
+ "tower-lsp",
+ "tree-sitter",
+ "tree-sitter-rshtml",
 ]
 
 [[package]]

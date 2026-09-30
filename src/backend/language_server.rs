@@ -617,7 +617,8 @@ impl LanguageServer for Backend {
                         let mut snippets = self.state.completion_items.clone();
                         for s in &mut snippets {
                             if s.text_edit.is_none() {
-                                let new_text = s.insert_text.clone().unwrap_or_else(|| s.label.clone());
+                                let new_text =
+                                    s.insert_text.clone().unwrap_or_else(|| s.label.clone());
                                 s.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
                                     range: word_range,
                                     new_text,
@@ -731,12 +732,17 @@ impl LanguageServer for Backend {
                             virt_pos.character
                         );
 
-                        if let Ok(ra_res) = ra.send_request("textDocument/definition", ra_req).await {
-                            if let Some(result_val) = ra_res.get("result").filter(|v| !v.is_null()) {
+                        if let Ok(ra_res) = ra.send_request("textDocument/definition", ra_req).await
+                        {
+                            if let Some(result_val) = ra_res.get("result").filter(|v| !v.is_null())
+                            {
                                 if let Ok(mut def_response) =
-                                    serde_json::from_value::<GotoDefinitionResponse>(result_val.clone())
+                                    serde_json::from_value::<GotoDefinitionResponse>(
+                                        result_val.clone(),
+                                    )
                                 {
-                                    self.translate_definition_response(&mut def_response, &vdoc).await;
+                                    self.translate_definition_response(&mut def_response, &vdoc)
+                                        .await;
                                     return Ok(Some(def_response));
                                 }
                             }
@@ -933,13 +939,22 @@ impl Backend {
         link: &mut LocationLink,
         origin_vdoc: &crate::virtual_file::VirtualDocument,
     ) {
-        if let Some(target_vdoc) = self.state.virtual_files.get_by_virtual_uri(&link.target_uri).await {
+        if let Some(target_vdoc) = self
+            .state
+            .virtual_files
+            .get_by_virtual_uri(&link.target_uri)
+            .await
+        {
             link.target_uri = target_vdoc.template_uri.clone();
-            if let Some(mapped) = target_vdoc.source_map.virtual_to_template_range(link.target_range) {
+            if let Some(mapped) = target_vdoc
+                .source_map
+                .virtual_to_template_range(link.target_range)
+            {
                 link.target_range = mapped;
             }
-            if let Some(mapped) =
-                target_vdoc.source_map.virtual_to_template_range(link.target_selection_range)
+            if let Some(mapped) = target_vdoc
+                .source_map
+                .virtual_to_template_range(link.target_selection_range)
             {
                 link.target_selection_range = mapped;
             }

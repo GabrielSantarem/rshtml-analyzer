@@ -138,6 +138,20 @@ impl SyntaxContext {
                         return Self::ComponentParameter(component_name);
                     }
                 }
+                "ERROR" => {
+                    if let Ok(err_text) = n.utf8_text(source.as_bytes()) {
+                        if err_text.trim_start().starts_with('.') {
+                            if let Some(prev) = n.prev_sibling() {
+                                if prev.kind() == "rust_expr_simple"
+                                    || prev.kind() == "rust_text"
+                                    || prev.kind() == "rust_block"
+                                {
+                                    return Self::RustCode;
+                                }
+                            }
+                        }
+                    }
+                }
                 "html_text" => return Self::Html,
                 _ => {}
             }
@@ -150,6 +164,15 @@ impl SyntaxContext {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_context_in_error_dot_after_rust_expr() {
+        let source = "<div>\n    @self.\n</div>";
+        let tree = parse_rshtml(source);
+        // Position at col 10 (after @self.)
+        let ctx = SyntaxContext::detect(&tree, source, Position::new(1, 10));
+        assert_eq!(ctx, SyntaxContext::RustCode, "Position right after @self. must be detected as RustCode");
+    }
+
     use super::*;
     use tree_sitter::Parser;
 
